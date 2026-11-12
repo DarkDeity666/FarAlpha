@@ -394,33 +394,30 @@ $$\text{Current Utilization \%} = \frac{\text{Actual CPU Usage}}{\text{Requested
 
 ## 9. Design Choices & Alternatives Considered
 
-### 1. MongoDB Deployment: StatefulSet vs. Deployment
-- **Chosen: `StatefulSet`**:
-  - MongoDB is an ACID-compliant stateful database that requires predictable identity, persistent storage mapping, and controlled startup/shutdown sequences.
-  - A StatefulSet provides stable network identifiers (`mongodb-0`), ordered rollouts, and guarantees that when a pod is rescheduled, it remounts the exact same Persistent Volume without race conditions.
-- **Alternative Considered: `Deployment`**:
-  - Rejected because Deployments treat pods as interchangeable and stateless. During rolling updates, a Deployment can spin up a second pod simultaneously, causing two MongoDB instances to attempt mounting the same `ReadWriteOnce` persistent volume concurrently, resulting in `Multi-Attach error for volume` and filesystem corruption.
+### 1. MongoDB: StatefulSet vs. Deployment
+- **My Choice: `StatefulSet`**  
+  MongoDB is stateful and stores data on disk. A StatefulSet gives the pod a fixed identity (`mongodb-0`) and ensures that upon restart or rescheduling, it always reconnects to the exact same Persistent Volume Claim (`mongodb-pvc`).
+- **Alternative Considered (`Deployment`)**:  
+  I considered using a simple Deployment, but Deployments treat pods as ephemeral and stateless. During rolling updates, a Deployment can spin up a replacement pod before shutting down the old one, causing two pods to contend for the same `ReadWriteOnce` volume and leading to `Multi-Attach error for volume`.
 
-### 2. Exposing MongoDB: Internal ClusterIP vs. NodePort
-- **Chosen: `ClusterIP` (`mongodb-service`)**:
-  - Adheres to the principle of least privilege and network isolation (Defense in Depth). MongoDB handles sensitive data; exposing it on a NodePort or LoadBalancer would expose port 27017 to the public internet or local host network, inviting brute-force and ransomware attacks.
-  - Flask communicates internally within the cluster CIDR.
-- **Alternative Considered: `NodePort` or `LoadBalancer`**:
-  - Rejected for security reasons. External access to MongoDB for administrative work should only be done temporarily via secure `kubectl port-forward svc/mongodb-service 27017:27017`.
+### 2. MongoDB Service: ClusterIP vs. NodePort
+- **My Choice: `ClusterIP` (`mongodb-service`)**  
+  MongoDB holds application data and should never be exposed outside the cluster network. A ClusterIP service gives it an internal virtual IP and DNS name accessible strictly by the Flask pods.
+- **Alternative Considered (`NodePort` or `LoadBalancer`)**:  
+  Exposing MongoDB on an external port would be a severe security risk. For administrative tasks, `kubectl port-forward` provides secure on-demand access without opening host ports.
 
-### 3. Exposing Flask: NodePort vs. LoadBalancer vs. Ingress
-- **Chosen: `NodePort`**:
-  - Ideal for local Kubernetes environments (Minikube). It functions natively without requiring external cloud cloud-provider controllers or active tunnel daemons. Static port `30005` provides predictable access.
-- **Alternatives Considered**:
-  - *LoadBalancer*: Requires running a background `minikube tunnel` command on Windows/macOS.
-  - *Ingress Controller*: Adds additional dependencies (`ingress-nginx` addon, DNS `/etc/hosts` mapping) which adds unnecessary complexity for a simple REST assessment.
+### 3. Flask Service: NodePort vs. LoadBalancer / Ingress
+- **My Choice: `NodePort` (port 30005)**  
+  NodePort works out of the box in Minikube across all platforms without requiring external load balancer controllers, tunnel daemons, or Ingress controllers.
+- **Alternatives Considered**:  
+  - *LoadBalancer*: In Minikube, LoadBalancers remain in `<pending>` state unless `minikube tunnel` runs in a separate administrative terminal.
+  - *Ingress*: Adds an extra dependency (`ingress-nginx` addon) and local `/etc/hosts` DNS overrides, which is overkill for a single service.
 
-### 4. Configuration Management: Secrets & ConfigMaps vs. Inline Environment Variables
-- **Chosen: Kubernetes `Secret` & `ConfigMap`**:
-  - Decouples configuration from application container images (12-Factor App methodology).
-  - Credentials (`MONGO_INITDB_ROOT_PASSWORD`) are encrypted at rest in etcd and separated from non-sensitive parameters (`MONGO_PORT`, `FLASK_ENV`).
-- **Alternative Considered: Hardcoding credentials in YAML/Dockerfile**:
-  - Strictly rejected as an anti-pattern that leaks credentials in source control.
+### 4. Configuration: Secrets & ConfigMaps vs. Plaintext Env
+- **My Choice: Kubernetes `Secret` & `ConfigMap`**  
+  I separated sensitive credentials (`MONGO_INITDB_ROOT_PASSWORD`, connection URI) into a Kubernetes Secret, while non-sensitive parameters (`MONGO_PORT`, `FLASK_ENV`) live in a ConfigMap. This keeps secrets out of version control and follows 12-factor principles.
+- **Alternative Considered**:  
+  Hardcoding connection strings inside Dockerfile or Deployment YAML is an anti-pattern and security vulnerability.
 
 ---
 
@@ -519,7 +516,7 @@ flask-hpa   Deployment/flask-app   10%/70%    2         5         2          14m
 
 ---
 
-### Issues Encountered & Engineering Solutions
+### Issues I Encountered & How I Solved Them
 
 1. **Issue: HPA displaying `<unknown>/70%` for CPU Targets**:
    - *Cause*: Minikube does not run the `metrics-server` pod by default, preventing the `metrics.k8s.io` API from serving pod resource telemetry.
